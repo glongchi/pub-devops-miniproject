@@ -85,7 +85,7 @@ const fargateContainer = new ecs.ContainerDefinition(stack, `EMD-FargateContaine
   ],
   environment: {
       EMD_VAR: 'option 1',
-      FAVORITE_DESSERT: 'ice cream'
+      FAVORITE_DESSERT: 'Chocolate Cake'
   },
   logging: new ecs.AwsLogDriver({ streamPrefix: "infra" })
 });
