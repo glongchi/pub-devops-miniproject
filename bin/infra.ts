@@ -4,26 +4,58 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { ApplicationProtocol } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as path from 'path';
 
 const app = new cdk.App();
 
 const stack = new cdk.Stack(app, 'EMD-FargateService15',
- // { env: { account: AWS_ACCOUNT, region: AWS_REGION }}
+ { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION }}
 );
 
 // Create VPC
 const vpc = new ec2.Vpc(stack, 'VPC', {
   maxAzs: 2,
-  natGateways: 0,
+  subnetConfiguration: [
+    {
+      cidrMask: 24,
+      name: 'EMD-PublicSubnet',
+      subnetType: ec2.SubnetType.PUBLIC,
+    },
+    {
+      cidrMask: 24,
+      name: 'EMD-PrivateSubnet',
+      subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+    },
+  ],
+  ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
 });
+
+
+
+
+// ALB Security Group
+const albSecurityGroup = new ec2.SecurityGroup(stack, 'EMD-ApplicationLoadBalancerSecurityGroup', { vpc });
+// Allow HTTP traffic from the load balancer
+albSecurityGroup.addIngressRule(
+  ec2.Peer.anyIpv4(),
+  ec2.Port.tcp(80),
+  'Allow All HTTP traffic'
+);
 
 // Create Load Balancer
 const alb = new elbv2.ApplicationLoadBalancer(stack, 'EMD-ApplicationLoadBalancer', {
   vpc: vpc,
   internetFacing: true,
   ipAddressType: elbv2.IpAddressType.IPV4,
+  securityGroup: albSecurityGroup,
+  loadBalancerName: 'EMD-ApplicationLoadBalancer',
+  vpcSubnets: {
+    subnetType: ec2.SubnetType.PUBLIC
+  }
+  
 });
+
 
 // Create Fargate Cluster
 const cluster = new ecs.Cluster(stack, 'Cluster', { vpc });
@@ -33,6 +65,10 @@ const fargateTaskDefinition = new ecs.FargateTaskDefinition(stack, `EMD-FargateT
   family: `EMD-CDK-fargateTaskDefinition`,
   cpu: 512,
   memoryLimitMiB: 1024,
+  runtimePlatform: {
+    cpuArchitecture: ecs.CpuArchitecture.ARM64,
+    operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+  }
 });
 
 // Create AWS Fargate Container
@@ -49,6 +85,7 @@ const fargateContainer = new ecs.ContainerDefinition(stack, `EMD-FargateContaine
   ],
   environment: {
       EMD_VAR: 'option 1',
+      FAVORITE_DESSERT: 'ice cream'
   },
   logging: new ecs.AwsLogDriver({ streamPrefix: "infra" })
 });
@@ -61,11 +98,12 @@ const ec2SecurityGroup = new ec2.SecurityGroup(stack, 'EMD-EC2SecurityGroup', {
 
 // Allow HTTP traffic from the load balancer
 ec2SecurityGroup.addIngressRule(
-  ec2.Peer.anyIpv4(),
+  ec2.Peer.securityGroupId(albSecurityGroup.securityGroupId),
   ec2.Port.tcp(80),
-  'Allow All HTTP traffic'
+  'Allow All HTTP traffic from ALB on port 80'
 );
 
+// create ECS service
 const service = new ecs.FargateService(stack, `EMD-ecs-service`, {
   assignPublicIp: true,
   cluster: cluster,
@@ -73,8 +111,8 @@ const service = new ecs.FargateService(stack, `EMD-ecs-service`, {
   platformVersion: ecs.FargatePlatformVersion.LATEST,
   vpcSubnets: {
       subnets: [
-          vpc.publicSubnets[0],
-          vpc.publicSubnets[1],
+          vpc.privateSubnets[0],
+          vpc.privateSubnets[1],
       ]
   },
   securityGroups: [ec2SecurityGroup]
@@ -94,11 +132,13 @@ httpListener.addTargets('EMD-ECS', {
   })],
 
 });
-function generateBucketName(stack: cdk.Stack) : string {
+
+ function generateBucketName(stack: cdk.Stack) : string {
   const environmentType = 'Development';
-  const region = stack.region.toUpperCase();
-  const timestamp = new Date().toISOString();
-  return `${environmentType}-${region}-${timestamp}`;
+  const region = stack.region;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const result = `${environmentType}-${region}-${timestamp}`;
+  return result.toLocaleLowerCase();
 }
 
 const logBucket = new s3.Bucket(stack, 'LogBucket', {
@@ -107,3 +147,6 @@ const logBucket = new s3.Bucket(stack, 'LogBucket', {
   autoDeleteObjects: true,
   versioned: true,
 });
+
+// enable logging to S3
+ alb.logAccessLogs(logBucket, 'alb-logs'); // 'alb-logs' is the optional prefix within the bucket
